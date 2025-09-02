@@ -1,2 +1,4 @@
-data_generation_size = 20
-database_connection_string = "your connection string!"
+data_generation_size = 500
+database_connection_string = "mysql+mysqlconnector://root:Hobojoe18??@localhost:3306/tia_db"
+#database_connection_string = "mysql+mysqlconnector://tia_dev_user:devpassword@localhost:3308/dev_tia_db"
+

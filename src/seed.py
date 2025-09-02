@@ -1,6 +1,10 @@
 import pycountry
 import models
 import factories
+import factory
+import random
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import not_
 
 from factory.alchemy import SQLAlchemyModelFactory
 from tqdm import tqdm
@@ -9,111 +13,175 @@ from database import engine, Base, SessionLocal
 
 
 def seed_regions(session):
+    """Seeds the regions table from pycountry."""
     session.query(models.Region).delete()
-
     regions_to_add = [
         models.Region(id=country.alpha_3, name=country.name)
         for country in pycountry.countries
     ]
-
     session.add_all(regions_to_add)
+    session.commit()
+
+
+def safe_create_batch(factory_class, num, session):
+    """Safely create batch of records handling potential duplicates."""
+    created = 0
+    attempts = 0
+    # Allow for more attempts as duplicates are more likely with get_or_create
+    max_attempts = num * 3
+
+    pbar = tqdm(total=num, desc=f"Creating {
+                factory_class._meta.model.__name__}")
+    while created < num and attempts < max_attempts:
+        try:
+            factory_class()
+            session.flush()
+            created += 1
+            pbar.update(1)
+        except IntegrityError:
+            session.rollback()
+            attempts += 1
+            continue
+        except Exception:
+            session.rollback()
+            raise
+
+    pbar.close()
+    if created < num:
+        print(f"Warning: Could only create {
+              created}/{num} unique {factory_class._meta.model.__name__} instances.")
+    return created
+
 
 def run_seeder():
+    """Seeds the database with structured, interconnected data."""
     print("Initializing database...")
-
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
 
     session = SessionLocal()
 
     try:
+        # --- Pre-computation and Session Setup ---
         for factory_class in SQLAlchemyModelFactory.__subclasses__():
             factory_class._meta.sqlalchemy_session = session
         if hasattr(factories, 'fake'):
             factories.fake.unique.clear()
 
-        print("Seeding regions...")
-
-        seed_regions(session)
-        session.commit()
-
         size = DATA_GENERATION_SIZE
 
-        print(f"Building entity objects with base size: {size}...\n")
+        # --- Stage 1: Seed Independent Lookup Tables ---
+        print("Seeding regions...")
+        seed_regions(session)
 
-        level_0_tasks = [
-            ("Users", factories.UserFactory, size),
+        print("\nSeeding independent lookup tables...")
+        independent_tasks = [
             ("Business Categories", factories.BusinessCategoryFactory, int(size * 0.2)),
             ("Business Phases", factories.BusinessPhaseFactory, 4),
             ("Business Roles", factories.BusinessRoleFactory, 4),
-            ("Business Skills", factories.BusinessSkillFactory, 4),
+            # Create a good base of skills
+            ("Business Skills", factories.BusinessSkillFactory, 15),
             ("Business Types", factories.BusinessTypeFactory, 4),
             ("Connection Types", factories.ConnectionTypeFactory, 4),
-            ("Daily Activities", factories.DailyActivityFactory, int(size * 0.2)),
             ("Industry Categories", factories.IndustryCategoryFactory, int(size * 0.2)),
             ("Mastermind Roles", factories.MastermindRoleFactory, 4),
             ("Strength Categories", factories.StrengthCategoryFactory, 4),
             ("Subscriptions", factories.SubscriptionFactory, 3),
+            ("Daily Activities", factories.DailyActivityFactory, int(size * 0.2)),
+            # Create a good base of tech skills
+            ("Skills", factories.SkillFactory, 50),
         ]
 
-        level_1_tasks = [
-            ("Businesses", factories.BusinessFactory, int(size * 0.6)),
-            ("Business Strengths", factories.BusinessStrengthFactory, int(size * 0.4)),
-            ("Case Studies", factories.CaseStudyFactory, int(size * 0.4)),
-            ("Ideas", factories.IdeaFactory, size),
-            ("Industries", factories.IndustryFactory, int(size * 0.4)),
-            ("Skill Categories", factories.SkillCategoryFactory, int(size * 0.2)),
-            ("Strengths", factories.StrengthFactory, int(size * 0.4)),
-            ("User Logins", factories.UserLoginFactory, size),
-            ("Projects", factories.ProjectFactory, int(size * 0.4)),
-            ("User Posts", factories.UserPostFactory, size),
-        ]
+        for description, factory_class, num in tqdm(independent_tasks, desc="Independent Tables"):
+            factory_class.create_batch(num)
+        session.commit()
+        print("Independent tables seeded.")
 
-        level_2_tasks = [
-            ("Business Connections", factories.BusinessConnectionFactory, int(size * 0.8)),
-            ("Daily Activity Enrolments", factories.DailyActivityEnrolmentFactory, size),
+        # --- Stage 2: Create Core User Objects ---
+        print(f"\nCreating {size} core User objects...")
+        users = factories.UserFactory.create_batch(size)
+        session.commit()
+        print(f"Users created and committed.")
+
+        # --- Stage 3: Create 1-to-1 Dependent Objects for each User ---
+        print("\nBuilding 1-to-1 objects for each user (Businesses, Logins, etc)...")
+        objects_to_add = []
+        for user in tqdm(users, desc="Creating User-specific entities"):
+            objects_to_add.append(
+                factories.BusinessFactory.build(operator=user))
+            objects_to_add.append(factories.UserLoginFactory.build(user=user))
+            objects_to_add.append(factories.IdeaFactory.build(submitter=user))
+            objects_to_add.append(factories.UserPostFactory.build(poster=user))
+            objects_to_add.append(
+                factories.UserSubscriptionFactory.build(user=user))
+
+        print(f"Bulk saving {len(objects_to_add)} user-dependent objects...")
+        session.add_all(objects_to_add)
+        session.commit()
+        print("User-dependent objects saved.")
+
+        # --- Stage 4: Create Secondary Core Objects ---
+        print("\nCreating secondary core objects like Projects...")
+        num_projects = int(size * 0.4)
+        project_managers = random.sample(users, min(len(users), num_projects))
+        projects = []
+        if project_managers:
+            projects = factories.ProjectFactory.create_batch(
+                len(project_managers), manager=factory.Iterator(project_managers))
+            session.commit()
+        print(f"{len(projects)} projects created.")
+
+        # --- Stage 5: Create Many-to-Many Relationships ---
+        print("\nBuilding logical and random relationships...")
+
+        # UPDATED: Create LOGICAL Business Connections first
+        print("Creating logical business connections...")
+        all_businesses = session.query(models.Business).all()
+        connections_to_add = []
+        connection_type = session.query(models.ConnectionType).filter(
+            not_(models.ConnectionType.name.in_(['Investor', 'Customer']))
+        ).first()
+
+        for business in tqdm(all_businesses, desc="Finding Partners"):
+            # Try to find a complementary partner for each business
+            partner = factories.get_complementary_business(session, business)
+            if partner and connection_type:
+                connections_to_add.append(factories.BusinessConnectionFactory.build(
+                    initiating_business=business,
+                    receiving_business=partner,
+                    connection_type=connection_type
+                ))
+        session.add_all(connections_to_add)
+        session.commit()
+        print(f"Created {len(connections_to_add)
+                         } logical business connections.")
+
+        # --- Create Other Random Relationships ---
+        many_to_many_tasks = [
             ("Idea Votes", factories.IdeaVoteFactory, size * 2),
-            ("Notifications", factories.NotificationFactory, size * 2),
-            ("Skills", factories.SkillFactory, int(size * 0.6)),
-            ("User Business Strengths", factories.UserBusinessStrengthFactory, size),
-            ("User Daily Activity Progress", factories.UserDailyActivityProgressFactory, size * 2),
+            ("User Skills", factories.UserSkillFactory, size),
             ("User Strengths", factories.UserStrengthFactory, size),
-            ("User Subscriptions", factories.UserSubscriptionFactory, int(size * 0.8)),
-            ("Project Business Categories", factories.ProjectBusinessCategoryFactory, int(size * 0.6)),
-            ("Project Business Skills", factories.ProjectBusinessSkillFactory, int(size * 0.6)),
+            ("Daily Activity Enrolments",
+             factories.DailyActivityEnrolmentFactory, size),
+            ("Project Business Categories",
+             factories.ProjectBusinessCategoryFactory, int(size * 0.6)),
+            ("Project Business Skills",
+             factories.ProjectBusinessSkillFactory, int(size * 0.6)),
             ("Project Regions", factories.ProjectRegionFactory, int(size * 0.6)),
         ]
 
-        level_3_tasks = [
-            ("Connection Mastermind Roles", factories.ConnectionMastermindRoleFactory, int(size * 0.4)),
-            ("User Skills", factories.UserSkillFactory, size),
-        ]
+        for description, factory_class, num in many_to_many_tasks:
+            if num > 0:
+                safe_create_batch(factory_class, num, session)
+                session.commit()
 
-        all_levels = [
-            ("Level 0", level_0_tasks),
-            ("Level 1", level_1_tasks),
-            ("Level 2", level_2_tasks),
-            ("Level 3", level_3_tasks),
-        ]
-
-        for level_name, tasks in all_levels:
-            print(f"--- Preparing {level_name} Objects ---")
-            all_objects_for_level = []
-
-            for description, factory_class, num_to_create in tqdm(tasks, desc="Building objects"):
-                built_objects = factory_class.build_batch(num_to_create)
-                all_objects_for_level.extend(built_objects)
-
-            print(f"Bulk saving {len(all_objects_for_level)} objects for {level_name}...")
-
-            session.add_all(all_objects_for_level)
-            session.commit()
-
-            print(f"{level_name} complete.\n")
-        print("Data generation complete!")
+        print("Secondary objects and relationships saved.")
+        print("\nData generation complete!")
 
     except Exception as e:
         print(f"\nAn error occurred: {e}")
+        import traceback
+        traceback.print_exc()
         session.rollback()
     finally:
         session.close()
