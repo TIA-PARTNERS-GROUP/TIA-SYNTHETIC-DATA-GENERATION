@@ -27,11 +27,9 @@ def safe_create_batch(factory_class, num, session):
     """Safely create batch of records handling potential duplicates."""
     created = 0
     attempts = 0
-    # Allow for more attempts as duplicates are more likely with get_or_create
     max_attempts = num * 3
 
-    pbar = tqdm(total=num, desc=f"Creating {
-                factory_class._meta.model.__name__}")
+    pbar = tqdm(total=num, desc=f"Creating {factory_class._meta.model.__name__}")
     while created < num and attempts < max_attempts:
         try:
             factory_class()
@@ -48,8 +46,9 @@ def safe_create_batch(factory_class, num, session):
 
     pbar.close()
     if created < num:
-        print(f"Warning: Could only create {
-              created}/{num} unique {factory_class._meta.model.__name__} instances.")
+        print(
+            f"Warning: Could only create {created}/{num} unique {factory_class._meta.model.__name__} instances."
+        )
     return created
 
 
@@ -62,15 +61,13 @@ def run_seeder():
     session = SessionLocal()
 
     try:
-        # --- Pre-computation and Session Setup ---
         for factory_class in SQLAlchemyModelFactory.__subclasses__():
             factory_class._meta.sqlalchemy_session = session
-        if hasattr(factories, 'fake'):
+        if hasattr(factories, "fake"):
             factories.fake.unique.clear()
 
         size = DATA_GENERATION_SIZE
 
-        # --- Stage 1: Seed Independent Lookup Tables ---
         print("Seeding regions...")
         seed_regions(session)
 
@@ -79,7 +76,6 @@ def run_seeder():
             ("Business Categories", factories.BusinessCategoryFactory, int(size * 0.2)),
             ("Business Phases", factories.BusinessPhaseFactory, 4),
             ("Business Roles", factories.BusinessRoleFactory, 4),
-            # Create a good base of skills
             ("Business Skills", factories.BusinessSkillFactory, 15),
             ("Business Types", factories.BusinessTypeFactory, 4),
             ("Connection Types", factories.ConnectionTypeFactory, 4),
@@ -88,86 +84,101 @@ def run_seeder():
             ("Strength Categories", factories.StrengthCategoryFactory, 4),
             ("Subscriptions", factories.SubscriptionFactory, 3),
             ("Daily Activities", factories.DailyActivityFactory, int(size * 0.2)),
-            # Create a good base of tech skills
             ("Skills", factories.SkillFactory, 50),
+            # NEW: Create industries which will be linked to categories by the factory.
+            ("Industries", factories.IndustryFactory, int(size * 0.4)),
         ]
 
-        for description, factory_class, num in tqdm(independent_tasks, desc="Independent Tables"):
+        for description, factory_class, num in tqdm(
+            independent_tasks, desc="Independent Tables"
+        ):
             factory_class.create_batch(num)
         session.commit()
         print("Independent tables seeded.")
 
-        # --- Stage 2: Create Core User Objects ---
         print(f"\nCreating {size} core User objects...")
         users = factories.UserFactory.create_batch(size)
         session.commit()
-        print(f"Users created and committed.")
+        print("Users created and committed.")
 
-        # --- Stage 3: Create 1-to-1 Dependent Objects for each User ---
         print("\nBuilding 1-to-1 objects for each user (Businesses, Logins, etc)...")
         objects_to_add = []
         for user in tqdm(users, desc="Creating User-specific entities"):
-            objects_to_add.append(
-                factories.BusinessFactory.build(operator=user))
+            objects_to_add.append(factories.BusinessFactory.build(operator=user))
             objects_to_add.append(factories.UserLoginFactory.build(user=user))
             objects_to_add.append(factories.IdeaFactory.build(submitter=user))
             objects_to_add.append(factories.UserPostFactory.build(poster=user))
-            objects_to_add.append(
-                factories.UserSubscriptionFactory.build(user=user))
+            objects_to_add.append(factories.UserSubscriptionFactory.build(user=user))
 
         print(f"Bulk saving {len(objects_to_add)} user-dependent objects...")
         session.add_all(objects_to_add)
         session.commit()
         print("User-dependent objects saved.")
 
-        # --- Stage 4: Create Secondary Core Objects ---
         print("\nCreating secondary core objects like Projects...")
         num_projects = int(size * 0.4)
         project_managers = random.sample(users, min(len(users), num_projects))
         projects = []
         if project_managers:
             projects = factories.ProjectFactory.create_batch(
-                len(project_managers), manager=factory.Iterator(project_managers))
+                len(project_managers), manager=factory.Iterator(project_managers)
+            )
             session.commit()
         print(f"{len(projects)} projects created.")
 
-        # --- Stage 5: Create Many-to-Many Relationships ---
         print("\nBuilding logical and random relationships...")
 
-        # UPDATED: Create LOGICAL Business Connections first
         print("Creating logical business connections...")
         all_businesses = session.query(models.Business).all()
         connections_to_add = []
-        connection_type = session.query(models.ConnectionType).filter(
-            not_(models.ConnectionType.name.in_(['Investor', 'Customer']))
-        ).first()
+        connection_type = (
+            session.query(models.ConnectionType)
+            .filter(not_(models.ConnectionType.name.in_(["Investor", "Customer"])))
+            .first()
+        )
 
         for business in tqdm(all_businesses, desc="Finding Partners"):
-            # Try to find a complementary partner for each business
             partner = factories.get_complementary_business(session, business)
             if partner and connection_type:
-                connections_to_add.append(factories.BusinessConnectionFactory.build(
-                    initiating_business=business,
-                    receiving_business=partner,
-                    connection_type=connection_type
-                ))
+                connections_to_add.append(
+                    factories.BusinessConnectionFactory.build(
+                        initiating_business=business,
+                        receiving_business=partner,
+                        connection_type=connection_type,
+                    )
+                )
         session.add_all(connections_to_add)
         session.commit()
-        print(f"Created {len(connections_to_add)
-                         } logical business connections.")
+        print(f"Created {len(connections_to_add)} logical business connections.")
 
-        # --- Create Other Random Relationships ---
         many_to_many_tasks = [
             ("Idea Votes", factories.IdeaVoteFactory, size * 2),
             ("User Skills", factories.UserSkillFactory, size),
             ("User Strengths", factories.UserStrengthFactory, size),
-            ("Daily Activity Enrolments",
-             factories.DailyActivityEnrolmentFactory, size),
-            ("Project Business Categories",
-             factories.ProjectBusinessCategoryFactory, int(size * 0.6)),
-            ("Project Business Skills",
-             factories.ProjectBusinessSkillFactory, int(size * 0.6)),
+            (
+                "Daily Activity Enrolments",
+                factories.DailyActivityEnrolmentFactory,
+                size,
+            ),
+            (
+                "Project Business Categories",
+                factories.ProjectBusinessCategoryFactory,
+                int(size * 0.6),
+            ),
+            (
+                "Project Business Skills",
+                factories.ProjectBusinessSkillFactory,
+                int(size * 0.6),
+            ),
             ("Project Regions", factories.ProjectRegionFactory, int(size * 0.6)),
+            # NEW: Create BusinessStrengths which will be linked to BusinessRoles by the factory.
+            ("Business Strengths", factories.BusinessStrengthFactory, size),
+            # NEW: Create the links between connections and mastermind roles.
+            (
+                "Connection Mastermind Roles",
+                factories.ConnectionMastermindRoleFactory,
+                int(size * 0.5),
+            ),
         ]
 
         for description, factory_class, num in many_to_many_tasks:
@@ -181,6 +192,7 @@ def run_seeder():
     except Exception as e:
         print(f"\nAn error occurred: {e}")
         import traceback
+
         traceback.print_exc()
         session.rollback()
     finally:
