@@ -4,7 +4,9 @@ try:
     with open("./config.toml", "r") as f:
         config = toml.load(f)
 except FileNotFoundError:
-    raise FileNotFoundError("The 'config.toml' file was not found in the project directory.")
+    raise FileNotFoundError(
+        "The 'config.toml' file was not found in the project directory."
+    )
 
 DB_CONNECTION_STRING = config.get("database_connection_string")
 DATA_GENERATION_SIZE = config.get("data_generation_size", 50)
